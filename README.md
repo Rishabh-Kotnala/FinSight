@@ -125,3 +125,44 @@ The AI agent retrieves relevant financial information, reasons over the data, an
 ```
 
 
+
+## Project Structure
+
+```text
+FinSight/
+├── .agents/             # AI agent configurations
+├── config/              # Configuration files
+├── frontend/            # React frontend application
+├── logs/                # Application logs
+├── MarketInsight/       # Core AI workflows & business logic
+├── .env                 # Environment variables (not committed)
+├── main.py              # FastAPI application entry point
+├── requirements.txt     # Python dependencies
+├── pyproject.toml       # Project configuration
+├── package.json         # Frontend dependencies
+├── render.yaml          # Deployment configuration
+└── README.md
+```
+
+
+## AI Capabilities
+
+FinSight provides AI-powered tools for stock market research and financial analysis, including:
+
+- Stock price tracking
+- Historical market data
+- Company information
+- Financial statements
+- Balance Sheet analysis
+- Income Statement analysis
+- Cash Flow analysis
+- Financial ratios
+- Dividend history
+- Stock split history
+- Institutional holdings
+- Insider transactions
+- Analyst recommendations
+- Company comparison
+- Natural language financial queries
+- Company ticker lookup
+
