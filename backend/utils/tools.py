@@ -3,7 +3,7 @@ import time
 import requests
 import yfinance as yf
 from langchain.tools import tool
-from MarketInsight.utils.logger import get_logger
+from backend.utils.logger import get_logger
 
 logger = get_logger("Tools")
 
@@ -90,7 +90,7 @@ def _search_yahoo_symbol(query: str) -> str | None:
         response = requests.get(
             "https://query2.finance.yahoo.com/v1/finance/search",
             params={"q": query, "quotes_count": 10, "news_count": 0},
-            headers={"User-Agent": "MarketInsight/1.0"},
+            headers={"User-Agent": "backend/1.0"},
             timeout=10,
         )
         response.raise_for_status()

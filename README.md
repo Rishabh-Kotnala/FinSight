@@ -136,7 +136,7 @@ FinSight/
 ├── config/              # Configuration files
 ├── frontend/            # React frontend application
 ├── logs/                # Application logs
-├── MarketInsight/       # Core AI workflows & business logic
+├── backend/       # Core AI workflows & business logic
 ├── .env                 # Environment variables (not committed)
 ├── main.py              # FastAPI application entry point
 ├── requirements.txt     # Python dependencies
