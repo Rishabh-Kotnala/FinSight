@@ -60,4 +60,68 @@ The AI agent retrieves relevant financial information, reasons over the data, an
 - Responsive design across devices
 
 
+## 🛠 Tech Stack
+
+### Backend
+- Python
+- FastAPI
+- LangChain
+- LangGraph
+- OpenAI GPT
+- Yahoo Finance API
+
+### Frontend
+- React
+- Vite
+- Tailwind CSS
+
+### AI & Data
+- Large Language Models (LLMs)
+- AI Agents
+- Financial Data Processing
+
+### Development Tools
+- Git
+- GitHub
+- VS Code
+
+
+## 🏗️ System Architecture
+
+```text
+                        +----------------------+
+                        |        User          |
+                        +----------+-----------+
+                                   |
+                                   v
+                    +-----------------------------+
+                    |      React Frontend         |
+                    +-------------+---------------+
+                                  |
+                                  v
+                    +-----------------------------+
+                    |      FastAPI Backend        |
+                    +-------------+---------------+
+                                  |
+                    +-------------+-------------+
+                    |                           |
+                    v                           v
+          +------------------+      +----------------------+
+          |   LangGraph AI   |      |   Financial Tools    |
+          |      Agent        |      | (Yahoo Finance API) |
+          +---------+---------+      +----------+----------+
+                    |                           |
+                    +-------------+-------------+
+                                  |
+                                  v
+                        +----------------------+
+                        |   OpenAI GPT Model   |
+                        +----------+-----------+
+                                   |
+                                   v
+                    +-----------------------------+
+                    | AI-Powered Financial Insights|
+                    +-----------------------------+
+```
+
 
