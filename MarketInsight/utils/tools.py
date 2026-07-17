@@ -1,0 +1,606 @@
+import json
+import time
+import requests
+import yfinance as yf
+from langchain.tools import tool
+from MarketInsight.utils.logger import get_logger
+
+logger = get_logger("Tools")
+
+
+INDIAN_TICKER_ALIASES = {
+    "nifty": "^NSEI",
+    "nifty 50": "^NSEI",
+    "nifty50": "^NSEI",
+    "nifty fifty": "^NSEI",
+    "nse nifty": "^NSEI",
+    "nse nifty 50": "^NSEI",
+    "bank nifty": "^NSEBANK",
+    "nifty bank": "^NSEBANK",
+    "sensex": "^BSESN",
+    "bse sensex": "^BSESN",
+    "bse": "^BSESN",
+    "nifty it": "^CNXIT",
+    "nifty midcap": "NIFTY_MID_SELECT.NS",
+    "reliance": "RELIANCE.NS",
+    "reliance industries": "RELIANCE.NS",
+    "tcs": "TCS.NS",
+    "tata consultancy services": "TCS.NS",
+    "infosys": "INFY.NS",
+    "hdfc bank": "HDFCBANK.NS",
+    "icici bank": "ICICIBANK.NS",
+    "sbi": "SBIN.NS",
+    "state bank of india": "SBIN.NS",
+    "itc": "ITC.NS",
+    "axis bank": "AXISBANK.NS",
+    "kotak bank": "KOTAKBANK.NS",
+    "larsen and toubro": "LT.NS",
+    "l&t": "LT.NS",
+    "bharti airtel": "BHARTIARTL.NS",
+    "airtel": "BHARTIARTL.NS",
+}
+
+
+def _clean_query(value: str) -> str:
+    return " ".join(value.strip().lower().replace("_", " ").split())
+
+
+def _is_yahoo_symbol(value: str) -> bool:
+    return value.startswith("^") or "." in value
+
+
+def _has_recent_data(ticker: str) -> bool:
+    try:
+        return not yf.Ticker(ticker).history(period="5d").empty
+    except Exception:
+        return False
+
+
+def resolve_ticker(ticker_or_name: str) -> str | None:
+    if not ticker_or_name or not isinstance(ticker_or_name, str):
+        return None
+
+    query = ticker_or_name.strip()
+    cleaned = _clean_query(query)
+
+    if cleaned in INDIAN_TICKER_ALIASES:
+        return INDIAN_TICKER_ALIASES[cleaned]
+
+    if _is_yahoo_symbol(query):
+        return query.upper()
+
+    uppercase_query = query.upper()
+    candidate_symbols = [uppercase_query]
+    if uppercase_query.isalnum():
+        candidate_symbols.extend([f"{uppercase_query}.NS", f"{uppercase_query}.BO"])
+
+    for candidate in candidate_symbols:
+        if _has_recent_data(candidate):
+            return candidate
+
+    searched_symbol = _search_yahoo_symbol(query)
+    if searched_symbol:
+        return searched_symbol
+
+    return None
+
+
+def _search_yahoo_symbol(query: str) -> str | None:
+    try:
+        response = requests.get(
+            "https://query2.finance.yahoo.com/v1/finance/search",
+            params={"q": query, "quotes_count": 10, "news_count": 0},
+            headers={"User-Agent": "MarketInsight/1.0"},
+            timeout=10,
+        )
+        response.raise_for_status()
+        quotes = response.json().get("quotes", [])
+    except Exception as e:
+        logger.error(f"Failed to search Yahoo ticker for {query}: {str(e)}")
+        return None
+
+    if not quotes:
+        return None
+
+    preferred_quotes = sorted(
+        quotes,
+        key=lambda quote: (
+            not (
+                str(quote.get("symbol", "")).endswith((".NS", ".BO"))
+                or str(quote.get("symbol", "")).startswith("^")
+            ),
+            quote.get("quoteType") not in {"EQUITY", "INDEX", "ETF", "MUTUALFUND"},
+        ),
+    )
+
+    symbol = preferred_quotes[0].get("symbol")
+    return symbol.upper() if isinstance(symbol, str) else None
+
+
+def _stock_for(ticker_or_name: str):
+    resolved_ticker = resolve_ticker(ticker_or_name)
+    if not resolved_ticker:
+        return None, None
+    return resolved_ticker, yf.Ticker(resolved_ticker)
+
+
+def _format_result(ticker: str, data, data_name: str):
+    if data is None:
+        return f"No {data_name} available for {ticker}."
+
+    if hasattr(data, "empty") and data.empty:
+        return f"No {data_name} available for {ticker}."
+
+    if hasattr(data, "to_dict"):
+        data = data.to_dict()
+
+    if data == {} or data == []:
+        return f"No {data_name} available for {ticker}."
+
+    return json.dumps(_json_safe(data), default=str)
+
+
+def _json_safe(value):
+    if isinstance(value, dict):
+        return {str(key): _json_safe(item) for key, item in value.items()}
+
+    if isinstance(value, list):
+        return [_json_safe(item) for item in value]
+
+    if isinstance(value, tuple):
+        return [_json_safe(item) for item in value]
+
+    if hasattr(value, "item"):
+        try:
+            return value.item()
+        except Exception:
+            pass
+
+    return value
+
+
+def _invalid_ticker_message(ticker_or_name: str):
+    return (
+        f"Could not resolve '{ticker_or_name}' to a valid Yahoo Finance ticker. "
+        "For Indian instruments, try names like 'Nifty 50' or Yahoo symbols like 'RELIANCE.NS'."
+    )
+
+
+# --------------------------------------------------------------------------------
+# Tool 1: Retrieve Company Stock Price
+# --------------------------------------------------------------------------------
+@tool('get_stock_price', description="A function that returns the current stock price of a given ticker")
+def get_stock_price(ticker: str):
+    logger.info(f"Retrieving Stock Price of {ticker}")
+
+    if not ticker or not isinstance(ticker, str):
+        return "Error: Invalid ticker provided. Please provide a valid ticker symbol."
+
+    start_time = time.time()
+
+    try:
+        resolved_ticker, stock = _stock_for(ticker)
+        if stock is None:
+            return _invalid_ticker_message(ticker)
+
+        info = stock.info or {}
+        stock_price = info.get("regularMarketPrice")
+        if stock_price is None:
+            stock_price = info.get("currentPrice") or info.get("previousClose")
+        if stock_price is None:
+            try:
+                fast_info = getattr(stock, "fast_info", None)
+                stock_price = getattr(fast_info, "last_price", None) if fast_info else None
+            except Exception:
+                stock_price = None
+
+        end_time = time.time()
+
+        if stock_price is None:
+            return f"No price data available for {resolved_ticker}."
+        
+        logger.info(f"Retrieved Stock Price of {resolved_ticker} in {end_time - start_time:.3f} seconds")
+        return f"{resolved_ticker}: {stock_price}"
+
+    except Exception as e:
+        logger.error(f"Failed to retrieve stock price of {ticker}: {str(e)}")
+        return "Error: Failed to retrieve stock price. Please try again later."
+
+
+# --------------------------------------------------------------------------------
+# Tool 2: Retrieve Company Stock Historical Data
+# --------------------------------------------------------------------------------
+@tool('get_historical_data', description="A function that returns the historical data of a given ticker in the given start and end date")
+def get_historical_data(ticker: str, start_date: str, end_date: str):
+    logger.info(f"Retrieving Historical Data of {ticker}")
+
+    if not ticker or not isinstance(ticker, str):
+        return "Error: Invalid ticker provided. Please provide a valid ticker symbol."
+
+    try:
+        start_time = time.time()
+        resolved_ticker, stock = _stock_for(ticker)
+        if stock is None:
+            return _invalid_ticker_message(ticker)
+
+        historical_data = _format_result(
+            resolved_ticker,
+            stock.history(start=start_date, end=end_date),
+            "historical data",
+        )
+
+        end_time = time.time()
+        logger.info(f"Retrieved Historical Data of {resolved_ticker} in {end_time - start_time:.3f} seconds")
+        return historical_data
+
+    except Exception as e:
+        logger.error(f"Failed to retrieve historical data of {ticker}: {str(e)}")
+        return "Error: Failed to retrieve historical data. Please try again later."
+
+
+# --------------------------------------------------------------------------------
+# Tool 3: Retrieve Company Stock News
+# --------------------------------------------------------------------------------
+@tool('get_stock_news', description="A function that returns the news of a given ticker")
+def get_stock_news(ticker: str):
+    logger.info(f"Retrieving News of {ticker}")
+
+    if not ticker or not isinstance(ticker, str):
+        return "Error: Invalid ticker provided. Please provide a valid ticker symbol."
+
+    try:
+        start_time = time.time()
+        resolved_ticker, stock = _stock_for(ticker)
+        if stock is None:
+            return _invalid_ticker_message(ticker)
+
+        news = _format_result(resolved_ticker, stock.news, "news")
+
+        end_time = time.time()
+        logger.info(f"Retrieved News of {resolved_ticker} in {end_time - start_time:.3f} seconds")
+        return news
+
+    except Exception as e:
+        logger.error(f"Failed to retrieve news of {ticker}: {str(e)}")
+        return "Error: Failed to retrieve news. Please try again later."
+
+
+# --------------------------------------------------------------------------------
+# Tool 4: Retrieve Company's Balance Sheet
+# --------------------------------------------------------------------------------
+@tool('get_balance_sheet', description="A function that returns the balance sheet of a given ticker")
+def get_balance_sheet(ticker: str):
+    logger.info(f"Retrieving Balance Sheet of {ticker}")
+
+    if not ticker or not isinstance(ticker, str):
+        return "Error: Invalid ticker provided. Please provide a valid ticker symbol."
+
+    try:
+        start_time = time.time()
+        resolved_ticker, stock = _stock_for(ticker)
+        if stock is None:
+            return _invalid_ticker_message(ticker)
+
+        balance_sheet = _format_result(resolved_ticker, stock.balance_sheet, "balance sheet")
+
+        end_time = time.time()
+        logger.info(f"Retrieved Balance Sheet of {resolved_ticker} in {end_time - start_time:.3f} seconds")
+        return balance_sheet
+
+    except Exception as e:
+        logger.error(f"Failed to retrieve balance sheet of {ticker}: {str(e)}")
+        return "Error: Failed to retrieve balance sheet. Please try again later."
+
+
+# --------------------------------------------------------------------------------
+# Tool 5: Retrieve Company's Income Statement
+# --------------------------------------------------------------------------------
+@tool('get_income_statement', description="A function that returns the income statement of a given ticker")
+def get_income_statement(ticker: str):
+    logger.info(f"Retrieving Income Statement of {ticker}")
+
+    if not ticker or not isinstance(ticker, str):
+        return "Error: Invalid ticker provided. Please provide a valid ticker symbol."
+
+    try:
+        start_time = time.time()
+        resolved_ticker, stock = _stock_for(ticker)
+        if stock is None:
+            return _invalid_ticker_message(ticker)
+
+        income_statement = _format_result(resolved_ticker, stock.financials, "income statement")
+
+        end_time = time.time()
+        logger.info(f"Retrieved Income Statement of {resolved_ticker} in {end_time - start_time:.3f} seconds")
+        return income_statement
+
+    except Exception as e:
+        logger.error(f"Failed to retrieve income statement of {ticker}: {str(e)}")
+        return "Error: Failed to retrieve income statement. Please try again later."
+    
+
+# --------------------------------------------------------------------------------
+# Tool 6: Retrieve Company's Cash Flow Statement
+# --------------------------------------------------------------------------------
+@tool('get_cash_flow', description="A function that returns the cash flow statement of a given ticker")
+def get_cash_flow(ticker: str):
+    logger.info(f"Retrieving Cash Flow of {ticker}")
+
+    if not ticker or not isinstance(ticker, str):
+        return "Error: Invalid ticker provided. Please provide a valid ticker symbol."
+
+    try:
+        start_time = time.time()
+        resolved_ticker, stock = _stock_for(ticker)
+        if stock is None:
+            return _invalid_ticker_message(ticker)
+
+        cash_flow = _format_result(resolved_ticker, stock.cashflow, "cash flow")
+
+        end_time = time.time()
+        logger.info(f"Retrieved Cash Flow of {resolved_ticker} in {end_time - start_time:.3f} seconds")
+        return cash_flow
+
+    except Exception as e:
+        logger.error(f"Failed to retrieve cash flow of {ticker}: {str(e)}")
+        return "Error: Failed to retrieve cash flow. Please try again later."
+
+# --------------------------------------------------------------------------------
+# Tool 7: Retrieve Company Info & Ratios
+# --------------------------------------------------------------------------------
+@tool('get_company_info', description="A function that returns company profile and key financial ratios")
+def get_company_info(ticker: str):
+    logger.info(f"Retrieving Company Info of {ticker}")
+
+    if not ticker or not isinstance(ticker, str):
+        return "Error: Invalid ticker provided. Please provide a valid ticker symbol."
+
+    try:
+        start_time = time.time()
+        resolved_ticker, stock = _stock_for(ticker)
+        if stock is None:
+            return _invalid_ticker_message(ticker)
+
+        info = _format_result(resolved_ticker, stock.info, "company info")
+
+        end_time = time.time()
+        logger.info(f"Retrieved Company Info of {resolved_ticker} in {end_time - start_time:.3f} seconds")
+        return info
+
+    except Exception as e:
+        logger.error(f"Failed to retrieve company info of {ticker}: {str(e)}")
+        return "Error: Failed to retrieve company info. Please try again later."
+
+# --------------------------------------------------------------------------------
+# Tool 8: Retrieve Dividend History
+# --------------------------------------------------------------------------------
+@tool('get_dividends', description="A function that returns the dividend payment history of a given ticker")
+def get_dividends(ticker: str):
+    logger.info(f"Retrieving Dividends of {ticker}")
+
+    if not ticker or not isinstance(ticker, str):
+        return "Error: Invalid ticker provided. Please provide a valid ticker symbol."
+
+    try:
+        start_time = time.time()
+        resolved_ticker, stock = _stock_for(ticker)
+        if stock is None:
+            return _invalid_ticker_message(ticker)
+
+        dividends = _format_result(resolved_ticker, stock.dividends, "dividends")
+
+        end_time = time.time()
+        logger.info(f"Retrieved Dividends of {resolved_ticker} in {end_time - start_time:.3f} seconds")
+        return dividends
+
+    except Exception as e:
+        logger.error(f"Failed to retrieve dividends of {ticker}: {str(e)}")
+        return "Error: Failed to retrieve dividends. Please try again later."
+
+# --------------------------------------------------------------------------------
+# Tool 9: Retrieve Stock Split History
+# --------------------------------------------------------------------------------
+@tool('get_splits', description="A function that returns the stock split history of a given ticker")
+def get_splits(ticker: str):
+    logger.info(f"Retrieving Stock Splits of {ticker}")
+
+    if not ticker or not isinstance(ticker, str):
+        return "Error: Invalid ticker provided. Please provide a valid ticker symbol."
+
+    try:
+        start_time = time.time()
+        resolved_ticker, stock = _stock_for(ticker)
+        if stock is None:
+            return _invalid_ticker_message(ticker)
+
+        splits = _format_result(resolved_ticker, stock.splits, "stock splits")
+
+        end_time = time.time()
+        logger.info(f"Retrieved Stock Splits of {resolved_ticker} in {end_time - start_time:.3f} seconds")
+        return splits
+
+    except Exception as e:
+        logger.error(f"Failed to retrieve stock splits of {ticker}: {str(e)}")
+        return "Error: Failed to retrieve stock splits. Please try again later."
+
+
+# --------------------------------------------------------------------------------
+# Tool 10: Retrieve Institutional Holders
+# --------------------------------------------------------------------------------
+@tool('get_institutional_holders', description="A function that returns the institutional ownership data of a given ticker")
+def get_institutional_holders(ticker: str):
+    logger.info(f"Retrieving Institutional Holders of {ticker}")
+
+    if not ticker or not isinstance(ticker, str):
+        return "Error: Invalid ticker provided. Please provide a valid ticker symbol."
+
+    try:
+        start_time = time.time()
+        resolved_ticker, stock = _stock_for(ticker)
+        if stock is None:
+            return _invalid_ticker_message(ticker)
+
+        holders = _format_result(resolved_ticker, stock.institutional_holders, "institutional holders")
+
+        end_time = time.time()
+        logger.info(f"Retrieved Institutional Holders of {resolved_ticker} in {end_time - start_time:.3f} seconds")
+        return holders
+
+    except Exception as e:
+        logger.error(f"Failed to retrieve institutional holders of {ticker}: {str(e)}")
+        return "Error: Failed to retrieve institutional holders. Please try again later."
+
+# --------------------------------------------------------------------------------
+# Tool 11: Retrieve Major Share Holders
+# --------------------------------------------------------------------------------
+@tool('get_major_shareholders', description="A function that returns the major share holder data of a given ticker")
+def get_major_shareholders(ticker: str):
+    logger.info(f"Retrieving Major Share Holders of {ticker}")
+
+    if not ticker or not isinstance(ticker, str):
+        return "Error: Invalid ticker provided. Please provide a valid ticker symbol."
+
+    try:
+        start_time = time.time()
+        resolved_ticker, stock = _stock_for(ticker)
+        if stock is None:
+            return _invalid_ticker_message(ticker)
+
+        holders = _format_result(resolved_ticker, stock.major_holders, "major share holders")
+
+        end_time = time.time()
+        logger.info(f"Retrieved Major Share Holders of {resolved_ticker} in {end_time - start_time:.3f} seconds")
+        return holders
+
+    except Exception as e:
+        logger.error(f"Failed to retrieve major share holders of {ticker}: {str(e)}")
+        return "Error: Failed to retrieve major share holders. Please try again later."
+
+# --------------------------------------------------------------------------------
+# Tool 12: Retrieve Mutual Fund Holders
+# --------------------------------------------------------------------------------
+@tool('get_mutual_fund_holders', description="A function that returns the mutual fund ownership data of a given ticker")
+def get_mutual_fund_holders(ticker: str):
+    logger.info(f"Retrieving Mutual Fund Holders of {ticker}")
+
+    if not ticker or not isinstance(ticker, str):
+        return "Error: Invalid ticker provided. Please provide a valid ticker symbol."
+
+    try:
+        start_time = time.time()
+        resolved_ticker, stock = _stock_for(ticker)
+        if stock is None:
+            return _invalid_ticker_message(ticker)
+
+        holders = _format_result(resolved_ticker, stock.mutualfund_holders, "mutual fund holders")
+
+        end_time = time.time()
+        logger.info(f"Retrieved Mutual Fund Holders of {resolved_ticker} in {end_time - start_time:.3f} seconds")
+        return holders
+
+    except Exception as e:
+        logger.error(f"Failed to retrieve mutual fund holders of {ticker}: {str(e)}")
+        return "Error: Failed to retrieve mutual fund holders. Please try again later."
+
+# --------------------------------------------------------------------------------
+# Tool 13: Retrieve Insider Transactions
+# --------------------------------------------------------------------------------
+@tool('get_insider_transactions', description="A function that returns the insider buy/sell transactions of a given ticker")
+def get_insider_transactions(ticker: str):
+    logger.info(f"Retrieving Insider Transactions of {ticker}")
+
+    if not ticker or not isinstance(ticker, str):
+        return "Error: Invalid ticker provided. Please provide a valid ticker symbol."
+
+    try:
+        start_time = time.time()
+        resolved_ticker, stock = _stock_for(ticker)
+        if stock is None:
+            return _invalid_ticker_message(ticker)
+
+        insider_txn = _format_result(resolved_ticker, stock.insider_transactions, "insider transactions")
+
+        end_time = time.time()
+        logger.info(f"Retrieved Insider Transactions of {resolved_ticker} in {end_time - start_time:.3f} seconds")
+        return insider_txn
+
+    except Exception as e:
+        logger.error(f"Failed to retrieve insider transactions of {ticker}: {str(e)}")
+        return "Error: Failed to retrieve insider transactions. Please try again later."
+
+# --------------------------------------------------------------------------------
+# Tool 14: Retrieve Analyst Recommendations
+# --------------------------------------------------------------------------------
+@tool('get_analyst_recommendations', description="A function that returns the analyst recommendations of a given ticker")
+def get_analyst_recommendations(ticker: str):
+    logger.info(f"Retrieving Analyst Recommendations of {ticker}")
+    
+    if not ticker or not isinstance(ticker, str):
+        return "Error: Invalid ticker provided. Please provide a valid ticker symbol."
+
+    try:
+        start_time = time.time()
+        resolved_ticker, stock = _stock_for(ticker)
+        if stock is None:
+            return _invalid_ticker_message(ticker)
+
+        recommendations = _format_result(resolved_ticker, stock.recommendations, "analyst recommendations")
+
+        end_time = time.time()
+        logger.info(f"Retrieved Analyst Recommendations of {resolved_ticker} in {end_time - start_time:.3f} seconds")
+        return recommendations
+
+    except Exception as e:
+        logger.error(f"Failed to retrieve analyst recommendations of {ticker}: {str(e)}")
+        return "Error: Failed to retrieve analyst recommendations. Please try again later."
+
+# --------------------------------------------------------------------------------
+# Tool 15: Retrieve Analyst Recommendations Summary
+# --------------------------------------------------------------------------------
+@tool('get_analyst_recommendations_summary', description="A function that returns the analyst recommendations summary of a given ticker")
+def get_analyst_recommendations_summary(ticker: str):
+    logger.info(f"Retrieving Analyst Recommendations Summary of {ticker}")
+    
+    if not ticker or not isinstance(ticker, str):
+        return "Error: Invalid ticker provided. Please provide a valid ticker symbol."
+
+    try:
+        start_time = time.time()
+        resolved_ticker, stock = _stock_for(ticker)
+        if stock is None:
+            return _invalid_ticker_message(ticker)
+
+        recommendations = _format_result(resolved_ticker, stock.recommendations_summary, "analyst recommendations summary")
+
+        end_time = time.time()
+        logger.info(f"Retrieved Analyst Recommendations Summary of {resolved_ticker} in {end_time - start_time:.3f} seconds")
+        return recommendations
+
+    except Exception as e:
+        logger.error(f"Failed to retrieve analyst recommendations summary of {ticker}: {str(e)}")
+        return "Error: Failed to retrieve analyst recommendations summary. Please try again later."
+
+# --------------------------------------------------------------------------------
+# Tool 16: Retrieve Company's Ticker/Symbol
+# --------------------------------------------------------------------------------
+@tool('get_ticker', description="A function that returns the ticker/symbol of a given company")
+def get_ticker(company_name: str):
+    logger.info(f"Retrieving Ticker of {company_name}")
+    
+    if not company_name or not isinstance(company_name, str):
+        return "Error: Invalid company name provided. Please provide a valid company name."
+
+    try:
+        start_time = time.time()
+        ticker = resolve_ticker(company_name)
+        end_time = time.time()
+
+        if ticker:
+            logger.info(f"Retrieved Ticker of {company_name} in {end_time - start_time:.3f} seconds")
+            return ticker
+
+        return _invalid_ticker_message(company_name)
+            
+    except Exception as e:
+        logger.error(f"Failed to retrieve ticker of {company_name}: {str(e)}")
+        return "Error: Failed to retrieve ticker. Please try again later."
